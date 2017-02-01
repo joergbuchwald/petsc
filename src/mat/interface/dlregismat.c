@@ -127,6 +127,9 @@ PETSC_EXTERN PetscErrorCode MatSolverTypeRegister_MKL_Pardiso(void);
 #if defined(PETSC_HAVE_MKL_CPARDISO)
 PETSC_EXTERN PetscErrorCode MatSolverTypeRegister_MKL_CPardiso(void);
 #endif
+#if defined(PETSC_HAVE_PARDISO)
+PETSC_EXTERN PetscErrorCode MatSolverTypeRegister_Pardiso(void);
+#endif
 #if defined(PETSC_HAVE_SUITESPARSE)
 PETSC_EXTERN PetscErrorCode MatSolverTypeRegister_SuiteSparse(void);
 #endif
@@ -437,6 +440,9 @@ PetscErrorCode  MatInitializePackage(void)
 #endif
 #if defined(PETSC_HAVE_MKL_CPARDISO)
   ierr = MatSolverTypeRegister_MKL_CPardiso();CHKERRQ(ierr);
+#endif
+#if defined(PETSC_HAVE_PARDISO)
+  ierr = MatSolverTypeRegister_Pardiso();CHKERRQ(ierr);
 #endif
 #if defined(PETSC_HAVE_SUITESPARSE)
   ierr = MatSolverTypeRegister_SuiteSparse();CHKERRQ(ierr);
