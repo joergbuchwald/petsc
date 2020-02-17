@@ -551,6 +551,8 @@ PetscErrorCode MatFactorPARDISOInitialize_Private(Mat A, MatFactorType ftype, Ma
 
   PARDISO_INIT(mat_pardiso->pt, &mat_pardiso->mtype, &mat_pardiso->solver, mat_pardiso->iparm, mat_pardiso->dparm, &mat_pardiso->err);
 
+  if (mat_pardiso->err < 0) SETERRQ1(PETSC_COMM_SELF,PETSC_ERR_LIB,"Error reported by PARDISO after initialization: err=%d\n. Please check manual",mat_pardiso->err);
+
   PetscFunctionReturn(0);
 }
 
