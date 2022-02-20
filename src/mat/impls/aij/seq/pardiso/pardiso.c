@@ -68,19 +68,19 @@ typedef struct {
   /* Define if matrix preserves sparse structure.*/
   MatStructure matstruc;
 
+  PetscBool    freeaij;
   /* True if pardiso functions have been used.*/
   PetscBool CleanUp;
 } Mat_PARDISO;
 
 /* Convert 0-based indexing to 1-based indexing */
-PETSC_STATIC_INLINE void zeroToOneIndexing(Mat_PARDISO *mat_pardiso)
+static inline void zeroToOneIndexing(Mat_PARDISO *mat_pardiso)
 {
    INT_TYPE *ia = mat_pardiso->ia;
    INT_TYPE *ja = mat_pardiso->ja;
    INT_TYPE n = mat_pardiso->n;
    INT_TYPE nz = mat_pardiso->nz;
    int i;
-
    for (i = 0; i <= n; i++)
       ++ia[i];
    for (i = 0; i < nz; i++)
@@ -88,7 +88,7 @@ PETSC_STATIC_INLINE void zeroToOneIndexing(Mat_PARDISO *mat_pardiso)
 }
 
 /* Convert 1-based indexing to 0-based indexing */
-PETSC_STATIC_INLINE void oneToZeroIndexing(Mat_PARDISO *mat_pardiso)
+static inline void oneToZeroIndexing(Mat_PARDISO *mat_pardiso)
 {
    INT_TYPE *ia = mat_pardiso->ia;
    INT_TYPE *ja = mat_pardiso->ja;
@@ -102,16 +102,34 @@ PETSC_STATIC_INLINE void oneToZeroIndexing(Mat_PARDISO *mat_pardiso)
       --ja[i];
 }
 
-PETSC_STATIC_INLINE PetscErrorCode MatCopy_PARDISO(Mat A, MatReuse reuse, INT_TYPE *nnz, INT_TYPE **r, INT_TYPE **c, void **v)
+static inline PetscErrorCode MatCopy_PARDISO(Mat A, MatReuse reuse, PetscBool *free, INT_TYPE *nnz, INT_TYPE **r, INT_TYPE **c, void **v)
 {
   Mat_SeqAIJ *aa=(Mat_SeqAIJ*)A->data;
+  PetscInt       bs  = A->rmap->bs,i;
+  PetscErrorCode ierr;
 
   PetscFunctionBegin;
   *v=aa->a;
-  if (reuse == MAT_INITIAL_MATRIX) {
-    *r   = (INT_TYPE*)aa->i;
-    *c   = (INT_TYPE*)aa->j;
-    *nnz = aa->nz;
+  if (bs == 1) { /* already in the correct format */
+    /* though PetscInt and INT_TYPE are of the same size since they are defined differently the Intel compiler requires a cast */
+    *r    = (INT_TYPE*)aa->i;
+    *c    = (INT_TYPE*)aa->j;
+    *nnz  = (INT_TYPE)aa->nz;
+    *free = PETSC_FALSE;
+  }else if (reuse == MAT_INITIAL_MATRIX) {
+    PetscInt m = A->rmap->n,nz = aa->nz;
+    PetscInt *row,*col;
+    ierr = PetscMalloc2(m+1,&row,nz,&col);CHKERRQ(ierr);
+    for (i=0; i<m+1; i++) {
+      row[i] = aa->i[i];
+    }
+    for (i=0; i<nz; i++) {
+      col[i] = aa->j[i];
+    }
+    *r    = (INT_TYPE*)row;
+    *c    = (INT_TYPE*)col;
+    *nnz  = (INT_TYPE)nz;
+    *free = PETSC_TRUE;
   }
   PetscFunctionReturn(0);
 }
@@ -132,7 +150,7 @@ PetscErrorCode MatDestroy_PARDISO(Mat A)
 
    zeroToOneIndexing(mat_pardiso);
 #if defined(PETSC_USE_DEBUG)
-    pardiso_chkmatrix(
+   pardiso_chkmatrix(
     &mat_pardiso->mtype,
     &mat_pardiso->n,
     mat_pardiso->a,
@@ -162,7 +180,9 @@ PetscErrorCode MatDestroy_PARDISO(Mat A)
   }
   ierr = PetscFree(mat_pardiso->perm);CHKERRQ(ierr);
   ierr = PetscFree(A->spptr);CHKERRQ(ierr);
-
+  if (mat_pardiso->freeaij) {
+    ierr = PetscFree2(mat_pardiso->ia,mat_pardiso->ja);CHKERRQ(ierr);
+  }
   /* clear composed functions */
   ierr = PetscObjectComposeFunction((PetscObject)A,"MatFactorGetSolverType_C",NULL);CHKERRQ(ierr);
   ierr = PetscObjectComposeFunction((PetscObject)A,"Mat_PardisoSetCntl_C",NULL);CHKERRQ(ierr);
@@ -201,7 +221,7 @@ PetscErrorCode MatSolve_PARDISO(Mat A,Vec b,Vec x)
     &mat_pardiso->err
     );
 #endif
-  PARDISO (mat_pardiso->pt, 
+  PARDISO (mat_pardiso->pt,
     &mat_pardiso->maxfct,
     &mat_pardiso->mnum,
     &mat_pardiso->mtype,
@@ -220,7 +240,7 @@ PetscErrorCode MatSolve_PARDISO(Mat A,Vec b,Vec x)
     mat_pardiso->dparm);
    oneToZeroIndexing(mat_pardiso);
 
-  if (mat_pardiso->err < 0) SETERRQ1(PETSC_COMM_SELF,PETSC_ERR_LIB,"Error reported by PARDISO: err=%d. Please check manual\n",mat_pardiso->err);
+  if (mat_pardiso->err < 0) SETERRQ(PETSC_COMM_SELF,PETSC_ERR_LIB,"Error reported by PARDISO: err=%d. Please check manual\n",mat_pardiso->err);
   ierr = VecRestoreArray(x,&xarray);CHKERRQ(ierr);
   ierr = VecRestoreArrayRead(b,&barray);CHKERRQ(ierr);
   mat_pardiso->CleanUp = PETSC_TRUE;
@@ -262,7 +282,6 @@ PetscErrorCode MatMatSolve_PARDISO(Mat A,Mat B,Mat X)
   if(mat_pardiso->nrhs > 0){
     ierr = MatDenseGetArray(B,&barray);
     ierr = MatDenseGetArray(X,&xarray);
-
     /* solve phase */
     mat_pardiso->phase = JOB_SOLVE_ITERATIVE_REFINEMENT;
     zeroToOneIndexing(mat_pardiso);
@@ -294,7 +313,7 @@ PetscErrorCode MatMatSolve_PARDISO(Mat A,Mat B,Mat X)
       &mat_pardiso->err,
       mat_pardiso->dparm);
    oneToZeroIndexing(mat_pardiso);
-    if (mat_pardiso->err < 0) SETERRQ1(PETSC_COMM_SELF,PETSC_ERR_LIB,"Error reported by PARDISO: err=%d. Please check manual\n",mat_pardiso->err);
+    if (mat_pardiso->err < 0) SETERRQ(PETSC_COMM_SELF,PETSC_ERR_LIB,"Error reported by PARDISO: err=%d. Please check manual\n",mat_pardiso->err);
   }
   mat_pardiso->CleanUp = PETSC_TRUE;
   PetscFunctionReturn(0);
@@ -311,13 +330,13 @@ PetscErrorCode MatFactorNumeric_PARDISO(Mat F,Mat A,const MatFactorInfo *info)
   /* numerical factorization phase */
   PetscFunctionBegin;
   mat_pardiso->matstruc = SAME_NONZERO_PATTERN;
-  ierr = MatCopy_PARDISO(A, MAT_REUSE_MATRIX, &mat_pardiso->nz, &mat_pardiso->ia, &mat_pardiso->ja, &mat_pardiso->a);CHKERRQ(ierr);
+  ierr = MatCopy_PARDISO(A, MAT_REUSE_MATRIX, &mat_pardiso->freeaij, &mat_pardiso->nz, &mat_pardiso->ia, &mat_pardiso->ja, &mat_pardiso->a);CHKERRQ(ierr);
 
   /* numerical factorization phase */
   mat_pardiso->phase = JOB_NUMERICAL_FACTORIZATION;
-   zeroToOneIndexing(mat_pardiso);
+  zeroToOneIndexing(mat_pardiso);
 #if defined(PETSC_USE_DEBUG)
-    pardiso_chkmatrix(
+   pardiso_chkmatrix(
     &mat_pardiso->mtype,
     &mat_pardiso->n,
     mat_pardiso->a,
@@ -344,7 +363,7 @@ PetscErrorCode MatFactorNumeric_PARDISO(Mat F,Mat A,const MatFactorInfo *info)
     &mat_pardiso->err,
     mat_pardiso->dparm);
    oneToZeroIndexing(mat_pardiso);
-  if (mat_pardiso->err < 0) SETERRQ1(PETSC_COMM_SELF,PETSC_ERR_LIB,"Error reported by PARDISO: err=%d. Please check manual\n",mat_pardiso->err);
+   if (mat_pardiso->err < 0) SETERRQ(PETSC_COMM_SELF,PETSC_ERR_LIB,"Error reported by PARDISO: err=%d. Please check manual\n",mat_pardiso->err);
 
   mat_pardiso->matstruc = SAME_NONZERO_PATTERN;
   mat_pardiso->CleanUp  = PETSC_TRUE;
@@ -375,7 +394,7 @@ PetscErrorCode PetscSetPARDISOFromOptions(Mat F, Mat A)
 
   ierr = PetscOptionsInt("-mat_pardiso_67","Indicates the actual matrix for the solution phase","None",mat_pardiso->mnum,&icntl,&flg);CHKERRQ(ierr);
   if (flg) mat_pardiso->mnum = icntl;
- 
+
   ierr = PetscOptionsInt("-mat_pardiso_68","Message level information","None",mat_pardiso->msglvl,&icntl,&flg);CHKERRQ(ierr);
   if (flg) mat_pardiso->msglvl = icntl;
 
@@ -470,7 +489,6 @@ PetscErrorCode PetscSetPARDISOFromOptions(Mat F, Mat A)
   if (flg) mat_pardiso->dparm[34-1] = dcntl;
   ierr = PetscOptionsReal("-mat_pardiso_dparm_35","","None",mat_pardiso->dparm[35-1],&dcntl,&flg);CHKERRQ(ierr);
   if (flg) mat_pardiso->dparm[35-1] = dcntl;
-
   PetscOptionsEnd();
   PetscFunctionReturn(0);
 }
@@ -479,7 +497,6 @@ PetscErrorCode MatFactorPARDISOInitialize_Private(Mat A, MatFactorType ftype, Ma
 {
   PetscErrorCode ierr;
   PetscInt       i;
-
 
   PetscFunctionBegin;
   for ( i = 0; i < IPARM_SIZE; i++ ){
@@ -507,7 +524,7 @@ PetscErrorCode MatFactorPARDISOInitialize_Private(Mat A, MatFactorType ftype, Ma
   mat_pardiso->iparm[25-1] =  1; /* Parallel Forward/Backward Solve */
   mat_pardiso->iparm[35-1] =  1; /* Cluster Sparse Solver use C-style indexing for ia and ja arrays */
   mat_pardiso->iparm[40-1] =  0; /* Input: matrix/rhs/solution stored on master */
-  
+
   mat_pardiso->CleanUp   = PETSC_FALSE;
   mat_pardiso->maxfct    = 1; /* Maximum number of numerical factorizations. */
   mat_pardiso->mnum      = 1; /* Which factorization to use. */
@@ -516,12 +533,12 @@ PetscErrorCode MatFactorPARDISOInitialize_Private(Mat A, MatFactorType ftype, Ma
   mat_pardiso->err       = 0;
 
   mat_pardiso->solver    = 0; /* 0: direct solver 1: multi-recursive iterative solver (initialize dparm) */
-  
+
   mat_pardiso->n         = A->rmap->N;
   mat_pardiso->nrhs      = 1;
   mat_pardiso->err       = 0;
   mat_pardiso->phase     = -1;
-  
+
   if(ftype == MAT_FACTOR_LU){
     /* Default type for non-sym */
 #if defined(PETSC_USE_COMPLEX)
@@ -551,8 +568,7 @@ PetscErrorCode MatFactorPARDISOInitialize_Private(Mat A, MatFactorType ftype, Ma
 
   PARDISO_INIT(mat_pardiso->pt, &mat_pardiso->mtype, &mat_pardiso->solver, mat_pardiso->iparm, mat_pardiso->dparm, &mat_pardiso->err);
 
-  if (mat_pardiso->err < 0) SETERRQ1(PETSC_COMM_SELF,PETSC_ERR_LIB,"Error reported by PARDISO after initialization: err=%d\n. Please check manual",mat_pardiso->err);
-
+  if (mat_pardiso->err < 0) SETERRQ(PETSC_COMM_SELF,PETSC_ERR_LIB,"Error reported by PARDISO after initialization: err=%d\n. Please check manual",mat_pardiso->err);
   PetscFunctionReturn(0);
 }
 
@@ -569,8 +585,10 @@ PetscErrorCode MatFactorSymbolic_AIJPARDISO_Private(Mat F,Mat A,const MatFactorI
 
   /* Set PARDISO options from the options database */
   ierr = PetscSetPARDISOFromOptions(F,A);CHKERRQ(ierr);
-
-  ierr = MatCopy_PARDISO(A, MAT_INITIAL_MATRIX, &mat_pardiso->nz, &mat_pardiso->ia, &mat_pardiso->ja, &mat_pardiso->a);CHKERRQ(ierr);
+  if (mat_pardiso->freeaij) {
+    ierr = PetscFree2(mat_pardiso->ia,mat_pardiso->ja);CHKERRQ(ierr);
+  }
+  ierr = MatCopy_PARDISO(A, MAT_INITIAL_MATRIX, &mat_pardiso->freeaij, &mat_pardiso->nz, &mat_pardiso->ia, &mat_pardiso->ja, &mat_pardiso->a);CHKERRQ(ierr);
   mat_pardiso->n = A->rmap->N;
 
   /* analysis phase */
@@ -588,7 +606,7 @@ PetscErrorCode MatFactorSymbolic_AIJPARDISO_Private(Mat F,Mat A,const MatFactorI
     );
 #endif
   PARDISO (
-    mat_pardiso->pt, 
+    mat_pardiso->pt,
     &mat_pardiso->maxfct,
     &mat_pardiso->mnum,
     &mat_pardiso->mtype,
@@ -606,7 +624,7 @@ PetscErrorCode MatFactorSymbolic_AIJPARDISO_Private(Mat F,Mat A,const MatFactorI
     &mat_pardiso->err,
     mat_pardiso->dparm);
    oneToZeroIndexing(mat_pardiso);
-  if (mat_pardiso->err < 0) SETERRQ1(PETSC_COMM_SELF,PETSC_ERR_LIB,"Error reported by PARDISO: err=%d\n. Please check manual",mat_pardiso->err);
+  if (mat_pardiso->err < 0) SETERRQ(PETSC_COMM_SELF,PETSC_ERR_LIB,"Error reported by PARDISO: err=%d\n. Please check manual",mat_pardiso->err);
 
   mat_pardiso->CleanUp = PETSC_TRUE;
 
@@ -809,7 +827,6 @@ PETSC_EXTERN PetscErrorCode MatGetFactor_sbaij_pardiso(Mat A,MatFactorType ftype
   PetscInt        bs;
 
   PetscFunctionBegin;
-
   /* Create the factorization matrix */
   ierr = PetscObjectTypeCompare((PetscObject)A,MATSEQSBAIJ,&isSeqSBAIJ);CHKERRQ(ierr);
   ierr = MatCreate(PetscObjectComm((PetscObject)A),&B);CHKERRQ(ierr);
@@ -817,10 +834,8 @@ PETSC_EXTERN PetscErrorCode MatGetFactor_sbaij_pardiso(Mat A,MatFactorType ftype
   ierr = MatSetType(B,((PetscObject)A)->type_name);CHKERRQ(ierr);
   ierr = MatSeqSBAIJSetPreallocation(B,1,0,NULL);CHKERRQ(ierr);
   ierr = MatGetBlockSize(A,&bs); CHKERRQ(ierr);
-
   if(bs != 1) SETERRQ(PETSC_COMM_SELF,PETSC_ERR_SUP,"Matrice MATSEQSBAIJ with block size other than 1 is not supported by Pardiso");
   if(ftype != MAT_FACTOR_CHOLESKY) SETERRQ(PETSC_COMM_SELF,PETSC_ERR_SUP,"Matrice MATSEQAIJ should be used only with MAT_FACTOR_CHOLESKY.");
-  
   B->ops->choleskyfactorsymbolic = MatCholeskyFactorSymbolic_AIJPARDISO;
   B->factortype                  = MAT_FACTOR_CHOLESKY;
   B->ops->destroy                = MatDestroy_PARDISO;
@@ -855,7 +870,6 @@ PETSC_EXTERN PetscErrorCode MatGetFactor_aij_pardiso(Mat A,MatFactorType ftype,M
   ierr = MatSeqAIJSetPreallocation(B,0,NULL);CHKERRQ(ierr);
 
   if(ftype != MAT_FACTOR_LU) SETERRQ(PETSC_COMM_SELF,PETSC_ERR_SUP,"Matrice MATSEQAIJ should be used only with MAT_FACTOR_LU.");
-
   B->ops->lufactorsymbolic = MatLUFactorSymbolic_AIJPARDISO;
   B->factortype            = MAT_FACTOR_LU;
   B->ops->destroy          = MatDestroy_PARDISO;
